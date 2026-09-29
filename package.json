@@ -1,0 +1,20 @@
+{
+  "name": "obsidian-jev-classifier",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Classify Obsidian note properties with Jev and a guide note.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": { "yaml": "^2.8.1" },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

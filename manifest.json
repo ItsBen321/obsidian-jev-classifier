@@ -1,0 +1,9 @@
+{
+  "id": "jev-classifier",
+  "name": "Jev Classifier",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Fill note properties from your classification guide with Jev, for one note or your whole vault.",
+  "author": "Ben",
+  "isDesktopOnly": false
+}

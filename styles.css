@@ -1,0 +1,12 @@
+.jev-vault-section {
+  margin: 1.5rem 0;
+  padding: 1.25rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+.jev-vault-section h3 { margin-top: 0; }
+.jev-vault-button { width: 100%; min-height: 48px; font-size: 1rem; }
+.jev-progress { width: 100%; accent-color: var(--interactive-accent); }
+.jev-current-note { overflow-wrap: anywhere; color: var(--text-muted); }
+.jev-failures { max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
