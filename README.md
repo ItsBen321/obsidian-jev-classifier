@@ -7,7 +7,7 @@ button for your initial setup.
 
 ## Install
 
-1. Download `jev-classifier-0.1.0.zip` from the
+1. Download `jev-classifier-0.2.0.zip` from the
    [latest release](https://github.com/ItsBen321/obsidian-jev-classifier/releases/latest)
    and extract it into your vault's `.obsidian/plugins/`
    directory. The result should be `.obsidian/plugins/jev-classifier/main.js`,
@@ -103,9 +103,15 @@ After setting up your guide, use **Classify entire vault** in plugin settings:
 
 1. Review the eligible note count and selected write mode.
 2. Press **Start classification**.
-3. Watch the progress and summary. Individual failures are listed at the end.
+3. Watch the active notes, retry status, and progress summary. Individual failures
+   are listed at the end.
+4. Use **Retry failed / unfinished** to process those notes again without repeating
+   notes that completed successfully. This button also works after pressing Stop.
 
-The plugin processes Markdown notes sequentially. It skips the guide, excluded
+The plugin processes **four notes in parallel** by default. Change **Notes in
+parallel** in settings to any value from 1 to 16. Each worker takes another note
+as soon as its current note finishes, and each result is saved separately. The
+plugin skips the guide, excluded
 folders or files, and notes with no body text. Optional exclusions accept one
 vault-relative folder or file path per line, such as `Templates` or `Private.md`.
 They also apply to individual-note classification.
@@ -113,14 +119,29 @@ They also apply to individual-note classification.
 **Stop classification**, closing the progress window, or disabling the plugin
 stops the run. Completed updates remain saved. An already-sent request may still
 finish on TypeSafe's servers and use credits, but its cancelled result is ignored.
-Authentication, connection, timeout, and persistent service failures stop the run;
-individual note failures do not. Temporary rate limits get up to two retries.
+
+Connection failures, 60-second request timeouts, HTTP 408/425/429, and server
+errors receive **up to three retries** (four attempts total), with increasing
+delays and a small random offset. Rate-limit and overload responses pause new
+attempts across all workers. A server's `Retry-After` header is respected, even
+if it asks for a pause longer than 30 seconds; Stop remains available while waiting.
+Higher concurrency may cause more rate limits, so start with the default.
+
+After exhausting retries, that note is recorded as failed and the other notes
+continue. Invalid or oversized notes are left for later without pointless
+retries. Only API-key/access errors (401/403) and missing credits (402) stop the
+whole run and cancel other workers. The failure list shows the reason and the
+notes you can retry. Obsidian cannot abort an already-sent network request, so
+timed-out attempts may still finish and use credits; their late answers are ignored.
 
 The run captures its guide, settings, and file list when the preview opens.
 Close and reopen the preview after editing those settings. Each note's contents
-are read just before its request. There is no persistent resume cursor: starting
-again evaluates eligible notes again, which uses API credits even for notes whose
-properties do not change. There is no plugin-specific vault-wide undo; normal
+are read just before its request. **Retry failed / unfinished** uses that same
+captured guide and settings and resets the progress counter to the remaining
+subset. The retry list lasts while the progress window stays open. Closing it or
+restarting Obsidian discards that list; starting a fresh vault run evaluates all
+eligible notes again, which uses API credits even for notes whose properties do
+not change. There is no plugin-specific vault-wide undo; normal
 Obsidian file recovery and your own backups remain available if configured.
 
 ## Data and credentials
@@ -150,7 +171,8 @@ The build creates `main.js` and `dist/jev-classifier/`. `npm run dev` rebuilds o
 changes. Obsidian is an external runtime dependency and is not bundled.
 
 Automated tests cover guide validation, Jev request/response handling, property
-merging, content preservation, cancellation, retries, vault progress, and the
+merging, content preservation, cancellation, retries, parallel workers, selective
+retry controls, vault progress, and the
 bundled plugin against a simulated Obsidian API. Actual classification quality
 and the Obsidian UI still need a live check with your API key and notes.
 
