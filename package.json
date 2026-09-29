@@ -2,6 +2,13 @@
   "name": "obsidian-jev-classifier",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ItsBen321/obsidian-jev-classifier.git"
+  },
+  "bugs": "https://github.com/ItsBen321/obsidian-jev-classifier/issues",
+  "homepage": "https://github.com/ItsBen321/obsidian-jev-classifier#readme",
   "description": "Classify Obsidian note properties with Jev and a guide note.",
   "type": "module",
   "scripts": {
