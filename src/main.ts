@@ -3,17 +3,22 @@ import {
   Setting, TFile, addIcon, normalizePath, requestUrl,
 } from 'obsidian';
 import { applyMatches, buildEvaluation, parseGuide, readMatches, splitNote, type Evaluation, type WriteMode } from './core';
-import { askJev, checkCancelled, ENDPOINT, type Transport } from './client';
-import { runBatch, type BatchProgress, type Outcome } from './batch';
+import { askJev, checkCancelled, ENDPOINT, JevError, RequestCooldown, type Transport } from './client';
+import { DEFAULT_CONCURRENCY, MAX_CONCURRENCY, normalizeConcurrency, runBatch, type BatchProgress, type Outcome } from './batch';
 import { STARTER_GUIDE } from './template';
 
-interface Settings { apiKey: string; guidePath: string; writeMode: WriteMode; excludedFolders: string }
-interface RunConfig { apiKey: string; guide: TFile; evaluation: Evaluation; writeMode: WriteMode; excluded: string[] }
-const DEFAULTS: Settings = { apiKey: '', guidePath: 'Jev classification guide.md', writeMode: 'merge', excludedFolders: '' };
+interface Settings { apiKey: string; guidePath: string; writeMode: WriteMode; excludedFolders: string; concurrency: number }
+interface RunConfig { apiKey: string; guide: TFile; evaluation: Evaluation; writeMode: WriteMode; excluded: string[]; concurrency: number }
+const DEFAULTS: Settings = { apiKey: '', guidePath: 'Jev classification guide.md', writeMode: 'merge', excludedFolders: '', concurrency: DEFAULT_CONCURRENCY };
 const transport: Transport = async (body, key) => {
   const response = await requestUrl({ url: ENDPOINT, method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body, throw: false });
   // Parse success bodies only; error bodies may be HTML or contain request details.
-  return { status: response.status, headers: response.headers, json: response.status >= 200 && response.status < 300 ? response.json : null };
+  let json: unknown = null;
+  if (response.status >= 200 && response.status < 300) {
+    try { json = response.json; }
+    catch { throw new JevError('Jev returned an unreadable response.', false, true); }
+  }
+  return { status: response.status, headers: response.headers, json };
 };
 
 export default class JevClassifier extends Plugin {
@@ -28,6 +33,7 @@ export default class JevClassifier extends Plugin {
       if (typeof saved?.[key] === 'string') this.settings[key] = saved[key];
     }
     this.settings.writeMode = saved?.writeMode === 'replace' ? 'replace' : 'merge';
+    this.settings.concurrency = normalizeConcurrency(saved?.concurrency);
     this.loaded = true;
     addIcon('jev-classifier', '<path d="M32 22h36v38c0 16-8 23-21 23S26 76 26 64" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><path d="m76 12 3 8 8 3-8 3-3 8-3-8-8-3 8-3z" fill="currentColor"/>');
     this.addRibbonIcon('jev-classifier', 'Jev: classify current note', () => void this.classifyCurrent());
@@ -56,12 +62,12 @@ export default class JevClassifier extends Plugin {
     if (!(guide instanceof TFile) || guide.extension !== 'md') throw new Error('Select a classification guide note in Settings → Jev Classifier.');
     await this.saveOpenEditors(guide);
     const evaluation = buildEvaluation(parseGuide(await this.app.vault.read(guide)));
-    return { apiKey: settings.apiKey.trim(), guide, evaluation, writeMode: settings.writeMode, excluded: settings.excludedFolders.split('\n').map(path => normalizePath(path.trim()).replace(/\/$/, '')).filter(Boolean) };
+    return { apiKey: settings.apiKey.trim(), guide, evaluation, writeMode: settings.writeMode, excluded: settings.excludedFolders.split('\n').map(path => normalizePath(path.trim()).replace(/\/$/, '')).filter(Boolean), concurrency: normalizeConcurrency(settings.concurrency) };
   }
   eligible(file: TFile, config: RunConfig): boolean {
     return file !== config.guide && file.extension === 'md' && !config.excluded.some(path => file.path === path || file.path.startsWith(`${path}/`));
   }
-  private async classify(file: TFile, config: RunConfig, signal: AbortSignal): Promise<Outcome> {
+  private async classify(file: TFile, config: RunConfig, signal: AbortSignal, cooldown?: RequestCooldown, onStatus?: (status: string) => void): Promise<Outcome> {
     checkCancelled(signal);
     if (!this.eligible(file, config)) return 'skipped';
     const path = file.path;
@@ -70,7 +76,10 @@ export default class JevClassifier extends Plugin {
     const content = splitNote(source).body;
     if (!content.trim()) return 'skipped';
     applyMatches(source, [], config.writeMode); // Reject malformed properties before calling Jev.
-    const response = await askJev(transport, config.apiKey, file.basename, content, config.evaluation, signal);
+    const response = await askJev(transport, config.apiKey, file.basename, content, config.evaluation, signal, {
+      cooldown,
+      onRetry: notice => onStatus?.(`Retry ${notice.attempt}/${notice.maxAttempts} after ${Math.ceil(notice.delayMs / 1000)}s. ${notice.reason}`),
+    });
     checkCancelled(signal);
     const matches = readMatches(config.evaluation, response);
     let changed = 0;
@@ -112,11 +121,12 @@ export default class JevClassifier extends Plugin {
     if (this.controller) throw new Error('Jev is already running.');
     if (!this.loaded) throw new Error('The plugin was unloaded.');
     const controller = this.controller = new AbortController();
+    const cooldown = new RequestCooldown();
     try {
-      return await runBatch(files, controller.signal, file => this.classify(file, config, controller.signal), state => {
+      return await runBatch(files, controller.signal, (file, signal, onStatus) => this.classify(file, config, signal, cooldown, onStatus), state => {
         this.status.setText(`Jev: ${state.processed}/${state.total}`);
         progress(state);
-      });
+      }, config.concurrency);
     } finally { this.controller = null; this.status.setText('Jev'); }
   }
   showError(error: unknown) { new Notice(error instanceof Error ? error.message : 'Jev could not finish. Try again.', 9000); }
@@ -160,9 +170,10 @@ class JevSettingsTab extends PluginSettingTab {
     new Setting(el).setName('Starter guide').setDesc('Creates an editable example note in the vault root.').addButton(button => button.setButtonText('Create starter guide').onClick(async () => { await plugin.createGuide(); this.display(); }));
     new Setting(el).setName('Existing classifications').setDesc('Add keeps filled single values and merges lists. Replace updates matching properties. No match leaves a property unchanged in either mode.').addDropdown(dropdown => dropdown.addOption('merge', 'Add and keep existing values').addOption('replace', 'Replace matching properties').setValue(plugin.settings.writeMode).onChange(async value => { plugin.settings.writeMode = value === 'replace' ? 'replace' : 'merge'; await plugin.saveSettings(); }));
     new Setting(el).setName('Excluded folders or notes').setDesc('Optional vault-relative paths, one per line. Applies to individual and vault-wide runs.').addTextArea(input => input.setPlaceholder('Templates\nArchive\nPrivate note.md').setValue(plugin.settings.excludedFolders).onChange(async value => { plugin.settings.excludedFolders = value; await plugin.saveSettings(); }));
+    new Setting(el).setName('Notes in parallel').setDesc('How many notes to classify at once. Default: 4. Higher values may hit API rate limits; all workers pause when Jev asks them to slow down.').addSlider(slider => slider.setLimits(1, MAX_CONCURRENCY, 1).setValue(plugin.settings.concurrency).setDynamicTooltip().onChange(async value => { plugin.settings.concurrency = normalizeConcurrency(value); await plugin.saveSettings(); }));
     const section = el.createDiv({ cls: 'jev-vault-section' });
     section.createEl('h3', { text: 'Classify your entire vault' });
-    section.createEl('p', { text: 'Use this after setting up your guide. Jev processes Markdown notes one at a time and saves each completed result. The guide, excluded paths, and notes with no body text are skipped.' });
+    section.createEl('p', { text: 'Use this after setting up your guide. Jev processes notes in parallel and saves each completed result. Temporary failures are retried up to three times, then that note is left for later while the run continues.' });
     const button = section.createEl('button', { text: 'Classify entire vault', cls: 'mod-cta jev-vault-button' });
     button.addEventListener('click', () => void plugin.openBulk());
     section.createEl('p', { cls: 'setting-item-description', text: 'The next screen shows the note count before starting. You can stop a run at any time; completed changes remain saved.' });
@@ -176,29 +187,40 @@ class BulkModal extends Modal {
   onOpen() {
     this.setTitle('Classify entire vault with Jev');
     const el = this.contentEl;
-    el.createEl('p', { text: `${this.files.length} Markdown notes are eligible. Empty notes are skipped during the run. Guide: ${this.config.guide.path}.` });
+    el.createEl('p', { text: `${this.files.length} Markdown notes are eligible, with up to ${this.config.concurrency} notes in parallel. Empty notes are skipped during the run. Guide: ${this.config.guide.path}.` });
     el.createEl('p', { text: `Mode: ${this.config.writeMode === 'merge' ? 'add matches and keep existing values' : 'replace properties that have matches'}. Note titles, bodies, and guide definitions will be sent to TypeSafe using your API credits.` });
     const status = el.createEl('p', { text: 'Ready to start.', attr: { 'aria-live': 'polite' } });
     const meter = el.createEl('progress', { cls: 'jev-progress', attr: { max: String(this.files.length || 1), value: '0', 'aria-label': 'Notes processed' } });
-    const current = el.createEl('p', { cls: 'jev-current-note' });
+    const current = el.createEl('ul', { cls: 'jev-current-note' });
     const results = el.createDiv();
+    let pendingFiles = this.files;
     const buttons = new Setting(el);
     buttons.addButton(start => start.setButtonText(`Start classification (${this.files.length} notes)`).setCta().setDisabled(!this.files.length).onClick(async () => {
       if (this.plugin.controller) { new Notice('Jev is already running.'); return; }
       start.setDisabled(true);
       this.running = true;
+      results.empty();
+      meter.max = pendingFiles.length || 1;
+      meter.value = 0;
       stop.textContent = 'Stop classification';
       try {
-        await this.plugin.classifyVault(this.config, this.files, state => {
+        const outcome = await this.plugin.classifyVault(this.config, pendingFiles, state => {
           meter.value = state.processed;
           status.setText(`${state.done ? state.stopped ? 'Stopped. ' : 'Finished. ' : ''}${state.processed}/${state.total} processed · ${state.updated} updated · ${state.unchanged} unchanged · ${state.skipped} skipped · ${state.failures.length} failed`);
-          current.setText(state.current);
+          current.empty();
+          for (const item of state.active) current.createEl('li', { text: `${item.path}: ${item.status}` });
           if (state.done && state.failures.length) {
             results.createEl('h3', { text: 'Notes that need attention' });
             const list = results.createEl('ul', { cls: 'jev-failures' });
             for (const failure of state.failures) list.createEl('li', { text: `${failure.path}: ${failure.message}` });
           }
         });
+        const remaining = new Set(outcome.remaining);
+        pendingFiles = pendingFiles.filter(file => remaining.has(file.path));
+        if (pendingFiles.length) {
+          start.setButtonText(`Retry failed / unfinished (${pendingFiles.length} notes)`).setDisabled(false);
+          results.createEl('p', { text: 'Retry processes only these notes. Completed notes will not be classified again.' });
+        } else start.setButtonText('All notes processed');
       } catch (error) { this.plugin.showError(error); status.setText('Could not start classification.'); }
       finally { this.running = false; stop.textContent = 'Close'; stop.disabled = false; }
     }));
